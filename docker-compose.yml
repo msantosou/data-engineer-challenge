@@ -10,4 +10,7 @@ services:
       - ./docs/sample-data:/app/docs/sample-data:ro
       - ./scripts:/app/scripts
       - ./tests:/app/tests
+      - ./data:/app/data
     command: tail -f /dev/null
+    network_mode: host
+    

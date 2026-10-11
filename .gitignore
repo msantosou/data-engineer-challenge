@@ -152,6 +152,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.venv_marvin/
+.venv/
+.venv_*/
 
 # Spyder project settings
 .spyderproject
@@ -218,3 +221,7 @@ __marimo__/
 # local tooling / internal
 .claude/
 docs/evaluation/
+
+# Python cache
+__pycache__/
+*.pyc
