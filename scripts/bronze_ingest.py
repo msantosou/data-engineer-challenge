@@ -70,7 +70,15 @@ def input_files(input_dir: Path) -> dict[str, list[Path]]:
     }
     found = {name: sorted(input_dir.glob(pattern)) for name, pattern in patterns.items()}
     # Fixture uses settlement_paysettler.csv; larger generated sets may use settlement_*.csv.
-    found["paysettler"] = sorted(set(input_dir.glob("settlement*.csv")))
+    daily_files = sorted(
+        (input_dir / "paysettler").glob("settlement_*.csv")
+    )
+
+    found["paysettler"] = (
+        daily_files
+        if daily_files
+        else sorted(input_dir.glob("settlement*.csv"))
+    )
     missing = [name for name, paths in found.items() if not paths]
     if missing:
         raise FileNotFoundError(f"Missing required sources in {input_dir}: {', '.join(missing)}")

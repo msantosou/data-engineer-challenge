@@ -16,6 +16,9 @@ import json
 import logging
 from pathlib import Path
 import sys
+import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import duckdb
@@ -38,30 +41,42 @@ def load_module(name: str, script: Path) -> Any:
     return module
 
 
-def execute_stages(input_dir: Path, db: Path, *, with_gold: bool, gold_script: Path | None) -> dict[str, Any]:
+def execute_stages(input_dir: Path, db: Path, *, with_gold: bool, gold_script: Path | None,
+                   observer: Any = None, run_id: str | None = None) -> dict[str, Any]:
     scripts = PROJECT_ROOT / "scripts"
     bronze = load_module("bronze_ingest_stage5", scripts / "bronze_ingest.py")
     silver = load_module("silver_cdc_stage5", scripts / "silver_cdc.py")
     dq = load_module("data_quality_stage5", scripts / "data_quality.py")
-
-    LOG.info("Etapa 1/3: Bronze")
-    bronze_report = bronze.ingest(input_dir, db)
-    LOG.info("Etapa 2/3: Silver + CDC")
-    silver_report = silver.materialize(db)
-    LOG.info("Etapa 3/3: Data Quality")
-    dq_report = dq.run_quality(db)
-
-    result: dict[str, Any] = {"bronze": bronze_report, "silver": silver_report, "data_quality": dq_report}
+    steps = [
+        ("bronze", lambda: bronze.ingest(input_dir, db)),
+        ("silver", lambda: silver.materialize(db)),
+        ("data_quality", lambda: dq.run_quality(db)),
+    ]
     if with_gold:
         if gold_script is None:
-            raise ValueError("Para executar a Gold, informe --gold-script scripts/<script_gold>.py")
+            raise ValueError("Para executar a Gold, informe --gold-script")
         gold = load_module("gold_stage5", gold_script)
         if not hasattr(gold, "materialize"):
-            raise ValueError("O módulo Gold precisa expor materialize(db_path: Path)")
-        LOG.info("Etapa 4/4: Gold")
-        result["gold"] = gold.materialize(db)
-    else:
-        LOG.warning("Gold NÃO executada. A Etapa 4 ainda precisa ser integrada (--with-gold --gold-script ...).")
+            raise ValueError("O modulo Gold precisa expor materialize(db_path: Path)")
+        steps.append(("gold", lambda: gold.materialize(db)))
+    if not with_gold:
+        LOG.warning("Gold nao executada; use --with-gold --gold-script scripts/gold.py")
+    result = {}
+    for i, (name, fn) in enumerate(steps, 1):
+        LOG.info("Etapa %s/%s: %s", i, len(steps), name)
+        started = datetime.now(timezone.utc)
+        tick = time.perf_counter()
+        try:
+            report = fn()
+        except Exception as exc:
+            if observer is not None and run_id is not None:
+                observer.record_step(run_id, name, "FAILED", started,
+                                     time.perf_counter() - tick, None, str(exc))
+            raise
+        if observer is not None and run_id is not None:
+            observer.record_step(run_id, name, "SUCCESS", started,
+                                 time.perf_counter() - tick, report, None)
+        result[name] = report
     return result
 
 
@@ -111,6 +126,7 @@ def main() -> None:
     parser.add_argument("--with-gold", action="store_true", help="Executa Etapa 4; requer --gold-script")
     parser.add_argument("--gold-script", type=Path, help="Script Python com função materialize(db_path)")
     parser.add_argument("--verify-idempotency", action="store_true", help="Executa duas vezes e compara snapshots lógicos")
+    parser.add_argument("--no-observability", action="store_true", help="Desabilita escrita em ops")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.with_gold and not args.gold_script:
@@ -118,16 +134,39 @@ def main() -> None:
     db = args.db.expanduser().resolve()
     source = args.input_dir.expanduser().resolve()
     gold_path = args.gold_script.expanduser().resolve() if args.gold_script else None
-    first = execute_stages(source, db, with_gold=args.with_gold, gold_script=gold_path)
-    if args.verify_idempotency:
-        before = snapshot(db)
-        execute_stages(source, db, with_gold=args.with_gold, gold_script=gold_path)
-        after = snapshot(db)
-        if before != after:
-            changed = [k for k in sorted(set(before) | set(after)) if before.get(k) != after.get(k)]
-            raise SystemExit("FALHA na idempotência: " + ", ".join(changed))
-        LOG.info("Idempotência OK: conteúdo lógico idêntico após reprocessamento")
-    print(json.dumps(first, ensure_ascii=False, default=str, indent=2))
+    observer = None
+    run_id = str(uuid.uuid4())
+    run_started = datetime.now(timezone.utc)
+    run_tick = time.perf_counter()
+    status = "SUCCESS"
+    error = None
+    if not args.no_observability:
+        from pipeline_observability import Observer
+        observer = Observer(db)
+        observer.start_run(run_id, source, args.with_gold, args.verify_idempotency, run_started)
+    try:
+        first = execute_stages(source, db, with_gold=args.with_gold,
+                               gold_script=gold_path, observer=observer, run_id=run_id)
+        if args.verify_idempotency:
+            before = snapshot(db)
+            execute_stages(source, db, with_gold=args.with_gold,
+                           gold_script=gold_path, observer=observer, run_id=run_id)
+            after = snapshot(db)
+            if before != after:
+                changed = [k for k in sorted(set(before) | set(after)) if before.get(k) != after.get(k)]
+                raise RuntimeError("FALHA na idempotencia: " + ", ".join(changed))
+            LOG.info("Idempotencia OK: conteudo logico identico apos reprocessamento")
+        print(json.dumps(first, ensure_ascii=False, default=str, indent=2))
+    except Exception as exc:
+        status, error = "FAILED", str(exc)
+        LOG.exception("Pipeline falhou: %s", exc)
+        raise
+    finally:
+        if observer is not None:
+            try:
+                observer.finish_run(run_id, status, time.perf_counter() - run_tick, error)
+            except Exception:
+                LOG.exception("Nao foi possivel persistir observabilidade; consultar logs do container")
 
 
 if __name__ == "__main__":
