@@ -1,6 +1,270 @@
-# Settlement Analytics — Marvin Data Engineering Challenge
+# Case Técnico — Engenheiro(a) de Dados Sênior / Especialista
+## Contexto de Negócio
 
-Pipeline local em **Python 3.12+, DuckDB e Docker Compose** que transforma dados de transações, reconciliações, merchants e arquivos PaySettler em três produtos analíticos, com validações de qualidade, CDC e observabilidade persistente. Implementação orientada ao case de [reconciliação de liquidações](https://github.com/marvincomvc/data-engineer-challenge) e ao [glossário](https://github.com/marvincomvc/data-engineer-challenge/blob/main/docs/domain-glossary.md).
+Você está entrando no time de dados de uma fintech que processa liquidações de pagamentos para merchants. A empresa opera o **Settlement Reconciliation Service** — um serviço em produção que:
+1. Recebe diariamente um **arquivo CSV** do processador de pagamentos externo (**PaySettler**) com as transações liquidadas nas últimas 24h
+2. Compara essas transações com os **registros internos** do sistema
+3. Categoriza cada transação e persiste os resultados em um **PostgreSQL** (`settlement_db`)
+O serviço funciona bem, mas **todos os dados vivem apenas no banco transacional**. O time de operações precisa saber se a taxa de discrepância está subindo. O CFO quer o volume transacionado por dia. Compliance precisa de histórico de auditoria. **Ninguém tem acesso estruturado a nada disso hoje.**
+### Sua Missão
+
+Construir uma solução que transforme esses dados em **produtos de dados** consumíveis pelo negócio. Cabe a você decidir como.
+
+---
+
+## Domínio: Reconciliação de Liquidações
+
+> O glossário completo está em [`docs/domain-glossary.md`](docs/domain-glossary.md). Leia antes de começar.
+### Tabelas Fonte (`settlement_db`)
+
+**`transactions`** — Transações internas do sistema
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `id` | bigint | PK |
+| `transaction_id` | uuid | Identificador único da transação |
+| `merchant_id` | varchar | Identificador do merchant |
+| `amount` | decimal | Valor da transação (BRL) |
+| `currency` | varchar | Moeda (ISO 4217) |
+| `status` | varchar | `COMPLETED`, `PENDING`, `FAILED` |
+| `description` | varchar | Descrição da transação |
+| `created_at` | timestamp | Data de criação |
+| `updated_at` | timestamp | Última atualização |
+**`reconciliation_runs`** — Execuções de reconciliação
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `id` | bigint | PK |
+| `reference_date` | date | Data de referência do arquivo (dia de negócio) |
+| `file_name` | varchar | Nome do arquivo processado |
+| `status` | varchar | `IN_PROGRESS`, `COMPLETED`, `FAILED` |
+| `total_transactions` | integer | Total de transações no arquivo |
+| `started_at` | timestamp | Início do processamento |
+| `completed_at` | timestamp | Fim do processamento |
+| `created_at` | timestamp | Data de criação do registro |
+**`reconciliation_results`** — Resultados da reconciliação
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `id` | bigint | PK |
+| `run_id` | bigint | FK → `reconciliation_runs.id` |
+| `transaction_id` | uuid | Identificador da transação |
+| `merchant_id` | varchar | Identificador do merchant |
+| `category` | varchar | `MATCHED`, `MISMATCHED`, `UNRECONCILED_PROCESSOR`, `UNRECONCILED_INTERNAL` |
+| `internal_amount` | decimal | Valor no sistema interno (null se unreconciled_processor) |
+| `processor_amount` | decimal | Valor no PaySettler (null se unreconciled_internal) |
+| `difference` | decimal | Diferença absoluta entre valores |
+| `created_at` | timestamp | Data de criação |
+**`enterprise_company`** — Dados cadastrais dos merchants
+
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `id` | bigint | PK |
+| `merchant_id` | varchar | Código do merchant |
+| `legal_name` | varchar | Razão social |
+| `trade_name` | varchar | Nome fantasia |
+| `document` | varchar | CNPJ |
+| `primary_cnae` | varchar | CNAE principal |
+| `created_at` | timestamp | Data de criação |
+| `updated_at` | timestamp | Última atualização |
+### Arquivo CSV do PaySettler
+
+O processador externo envia diariamente um CSV com as transações liquidadas.
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `transaction_id` | uuid | Identificador da transação |
+| `merchant_id` | varchar | Identificador do merchant |
+| `amount` | decimal | Valor liquidado |
+| `currency` | varchar | Moeda (ISO 4217) |
+| `settled_at` | datetime (ISO 8601, UTC) | Data/hora da liquidação |
+| `processor_reference` | varchar | Referência interna do processador |
+| `status` | varchar | `SETTLED` ou `REVERSED` |
+
+---
+## Stack
+
+- **Linguagem:** Python 3.12+
+- **Processamento:** DuckDB
+- **Conteinerização:** Docker + Docker Compose
+- **Armazenamento:** Filesystem local
+
+A solução deve **rodar localmente** com `docker-compose up`.
+
+---
+## Dados de Exemplo
+
+Na pasta `docs/sample-data/` você encontrará:
+
+- `transactions_batch_1.parquet` — Transações internas (lote 1)
+- `transactions_batch_2.parquet` — Transações internas (lote 2)
+- `reconciliation_runs.parquet` — Execuções de reconciliação
+- `reconciliation_results.parquet` — Resultados categorizados
+- `settlement_paysettler.csv` — Arquivo CSV do PaySettler
+- `enterprise_company.parquet` — Dados cadastrais de merchants
+
+---
+## Como Começar
+
+1. **Faça um fork** deste repositório para sua conta pessoal do GitHub
+2. Clone o seu fork e trabalhe nele normalmente
+3. Suba o ambiente:
+
+```bash
+docker compose up -d --build
+# ou: make up
+```
+
+Um `Makefile` no repositório expõe atalhos para as operações mais comuns (`make help` lista os alvos disponíveis). O uso é opcional.
+
+---
+
+## Requisitos
+### Parte 1 — Modelagem e Analytics
+
+Usando os dados disponíveis, **modele e implemente tabelas analíticas** que atendam os seguintes consumidores:
+
+- **Operações:** precisa acompanhar a saúde das reconciliações no dia a dia
+- **CFO:** precisa de visão consolidada do volume financeiro
+- **Compliance:** precisa de rastreabilidade e histórico para auditorias
+**A forma e o conteúdo das tabelas são decisão sua.** Traduza as dores acima em métricas e tabelas analíticas (fatos e dimensões) que você defenderia em produção. Documente, para cada consumidor:
+
+- **Quais perguntas** seu modelo consegue responder (e quais deliberadamente não)
+- **Por que** essas e não outras (priorização, tradeoffs de escopo vs tempo)
+Entregue também exemplos de queries rodando contra suas tabelas que respondem as perguntas que você propôs. Queremos ver seu raciocínio de produto, não só SQL.
+
+---
+### Parte 2 — Pipeline de Dados
+
+Implemente o pipeline que processa as fontes de dados disponíveis e prepara o insumo para as tabelas analíticas da Parte 1.
+
+O volume em `docs/sample-data/` é pequeno de propósito — assuma **~5M transações/mês em produção** e projete para crescer. Se quiser validar na prática como seu pipeline se comporta em escala, use o gerador descrito na seção _"Dados de Exemplo e Geração de Volume"_.
+Critérios de qualidade (como você os atende é decisão sua — documente suas escolhas):
+- **Correção:** a saída do pipeline bate com o contrato de dados que você propôs
+- **Idempotência:** executar o pipeline para a mesma data de referência duas vezes não pode duplicar registros nem corromper as tabelas. Considere como isso se manifesta na sua CLI, nas tabelas finais e em falhas no meio da execução
+- **Observabilidade:** em produção, quando algo quebrar, que sinais você precisaria para diagnosticar rapidamente?
+- **Qualidade de dados:** quais checks você adicionaria para proteger os consumidores de downstream de dados incorretos? O que faria o pipeline parar versus apenas alertar?
+- **Testabilidade:** como você valida automaticamente que uma mudança no código não quebra o comportamento?
+Stack obrigatória: **DuckDB** para processamento, **Python 3.12+**, **Docker Compose** para subir o ambiente.
+
+---
+### Parte 3 — Arquitetura
+
+#### 3.1 Desenho de Arquitetura
+
+**Explique e/ou desenhe** como você levaria esses dados do banco transacional até o consumo pelo negócio em produção.
+
+#### 3.2 Troubleshooting
+
+Segunda-feira de manhã. Ops abre um chamado: os dashboards de reconciliação estão sem dados desde sexta-feira à noite. Você é o primeiro a chegar.
+
+Como você investigaria? Que artefatos do próprio pipeline você consultaria? Até onde iria antes de acionar mais alguém?
+#### 3.3 Escalabilidade
+
+Hoje o volume é pequeno, mas o negócio projeta chegar em **~5M transações/dia** em 18 meses (≈1,8B/ano em `reconciliation_results`). Como você prepararia a plataforma para esse crescimento? Onde o desenho atual quebra primeiro?
+
+---
+
+## Dados de Exemplo e Geração de Volume
+
+O repositório oferece duas fontes de dado. **A escolha de volume e de quais fontes usar é sua.**
+### 1. Fixture pequeno — `docs/sample-data/`
+
+Cerca de 1.000 transações internas e ~500 liquidações. Pensado para exploração, desenvolvimento local e como insumo default dos exemplos de queries da Parte 1.
+### 2. Gerador sintético — `scripts/generate_sample_data.py`
+
+Produz o mesmo schema do fixture (CDC `Op`/`_timestamp`, schema drift entre batches, padrões realistas de dados sujos) em volume arbitrário. Útil para validar seu pipeline em escala — por exemplo, ao redor dos ~5M transações/mês assumidos na Parte 2.
+
+**Você define o volume e as características.** O script é parametrizável:
+```bash
+# dataset médio para smoke em escala (1M transações, 90 dias)
+python scripts/generate_sample_data.py --rows 1000000 --days 90 --out /tmp/medium
+# dataset alinhado à projeção de ~5M transações/mês
+python scripts/generate_sample_data.py --rows 5000000 --days 30 --out /tmp/month
+```
+
+Flags principais:
+
+| Flag | Descrição | Default |
+|------|-----------|---------|
+| `--rows N` | Total de transações internas a gerar | `1000000` |
+| `--days N` | Janela temporal em dias | `90` |
+| `--merchants N` | Número de merchants | `500` |
+| `--seed N` | Semente determinística | `42` |
+| `--out PATH` | Diretório de saída | `docs/sample-data` |
+Rode `python scripts/generate_sample_data.py --help` para a lista completa. Dentro do container, `make generate` (10k linhas) e `make generate-large` (1M linhas) são atalhos prontos.
+
+---
+## Uso de IA
+
+Fique à vontade para usar ferramentas de IA durante o desafio. Se usar, documente no item _"Ferramentas de IA utilizadas"_ da entrega quais ferramentas e para quê. Se mantiver prompts, configs (`CLAUDE.md`, `.cursorrules`, etc.) ou transcrições no repositório, melhor — ajuda a entender seu processo.
+
+---
+
+## Entrega
+
+## Implementação entregue — guia de avaliação
+
+> **Orientação de leitura:** o enunciado original, incluindo fontes, requisitos, regras e instruções de entrega, foi preservado neste arquivo. Abaixo está o índice da solução implementada; os detalhes técnicos e comandos estão na seção [Solução desenvolvida](#solução-desenvolvida--settlement-analytics), ao final.
+
+| Requisito | Evidência na implementação |
+|---|---|
+| **Parte 1 — Modelagem e Analytics** | `gold.daily_financial_volume` (CFO), `gold.daily_reconciliation_metrics` (Operações), `gold.reconciliation_audit_trail` (Compliance), contratos Gold e consultas analíticas de exemplo. |
+| **Parte 2 — Pipeline** | Bronze Parquet/CSV, Silver CDC I/U/D com quarentena de empates, Data Quality (`dq.issues`), CLI, testes e idempotência lógica verificada. |
+| **Observabilidade** | Histórico de runs, etapas, duração, erros e métricas em `ops.pipeline_runs`, `ops.pipeline_steps` e `ops.pipeline_metrics`. |
+| **Parte 3 — Arquitetura** | Diagrama Mermaid, plano de troubleshooting, análise de gargalos e estratégia documentada para crescimento a 5 milhões/dia. |
+| **Extensibilidade** | Mudanças necessárias para adicionar um segundo processador estimadas por módulo, testes e configuração futura. |
+| **Validação prática** | 22 testes aprovados no conjunto inicialmente validado; benchmark sintético de referência de 1 milhão: 76,68 s somados nas quatro etapas. |
+
+**Limites declarados:** o desenho executa *full refresh*, não processamento incremental; a conferência automatizada de idempotência não compara hashes Gold; falhas entre etapas não formam uma transação única entre todas as camadas; não há reconciliação financeira independente do serviço de origem. Essas decisões e possíveis evoluções estão documentadas abaixo.
+
+---
+
+1. Ao finalizar, **abra um Pull Request do seu fork para o repositório original** (branch `main`)
+2. Preencha as seções abaixo no README do seu PR:
+### Como rodar
+
+_Descreva os passos para rodar a aplicação._
+
+### Premissas e decisões
+
+_Documente as ambiguidades que encontrou e as decisões que tomou._
+
+### Visão geral da arquitetura
+
+_Descreva a estrutura do projeto. Diagrama é bem-vindo._
+### Extensibilidade
+
+_Se amanhã precisarmos plugar uma **segunda fonte de liquidação** (ex.: outro processador além do PaySettler, com schema parecido mas não idêntico), **quantos arquivos/linhas mudam** no seu projeto? Descreva o caminho concreto — quais módulos tocam, qual config precisa ser estendida, quais testes rodam de novo._
+### Limites do desenho
+
+_O que a sua arquitetura **deliberadamente não suporta hoje** e que você sabe que uma versão de produção precisaria? Dê **2 a 3 exemplos concretos** (evite "melhorar logs" ou "mais testes" — seja específico)._
+
+### O que faria diferente em produção
+
+_O que simplificou? O que a versão de produção precisaria?_
+
+### Ferramentas de IA utilizadas
+
+_Quais ferramentas de IA usou e para quê? Encorajamos o uso de IA — queremos entender como você a utiliza como ferramenta de trabalho._
+
+---
+## Prazo
+
+Você tem **3 a 4 dias** para completar o desafio.
+
+Valorizamos uma solução **completa, limpa e bem documentada** mais do que rica em features. Se o tempo estiver curto, reduza escopo, não qualidade.
+
+---
+## Observações
+
+- **Não inclua código malicioso no projeto.** Caso identificado, o projeto será desconsiderado.
+- Após a entrega, faremos uma **conversa técnica de ~45 minutos** sobre sua implementação e decisões.
+
+*Boa sorte! Qualquer dúvida sobre o enunciado, entre em contato antes de assumir premissas.*
+
+
+---
+
+## Solução desenvolvida — Settlement Analytics
+
+Pipeline local em **Python 3.12+, DuckDB e Docker Compose** que transforma dados de transações, reconciliações, merchants e arquivos PaySettler em três produtos analíticos. Implementação orientada ao case de [reconciliação de liquidações](https://github.com/marvincomvc/data-engineer-challenge) e ao [glossário](https://github.com/marvincomvc/data-engineer-challenge/blob/main/docs/domain-glossary.md).
 
 ## Como rodar
 
@@ -72,7 +336,7 @@ A UI do DuckDB é opcional (CLI: `duckdb /app/data/marvin.duckdb`, seguida de `L
 | `gold.daily_reconciliation_metrics` | 9 linhas |
 | `gold.reconciliation_audit_trail` | 837 eventos |
 
-As contagens são evidências de uma execução local; não são valores contratuais para outros dados de entrada. Os datasets sintéticos de benchmark são processados em bancos separados, sem substituir os arquivos originais.
+As contagens são evidências de uma execução local; não são valores contratuais para outros dados de entrada.
 
 ## Premissas e decisões
 
@@ -86,8 +350,8 @@ As contagens são evidências de uma execução local; não são valores contrat
 - **Operações:** usa a última execução `COMPLETED` por `reference_date` (`completed_at`, `started_at`, `id` decrescente) e publica métricas **reportadas**, não recomputadas contra transações internas.
 - **Compliance:** conserva cada evento CDC de `bronze.reconciliation_results` enriquecido com o **estado atual** do run; não é reconstrução histórica completa de todos os campos do run.
 
-- **Full refresh intencional:** o pipeline relê o conjunto completo de arquivos a cada execução para priorizar reprodutibilidade, simplicidade operacional e validação determinística do CDC. Idempotência neste desenho pressupõe um snapshot completo e estável das entradas. Ingestão incremental, checkpoints e recomputação seletiva são evoluções previstas, não funcionalidades implementadas.
-- **Reconciliação independente fora do escopo:** este projeto consome os resultados do serviço de reconciliação e publica análises e diagnósticos sobre eles. Não recalcula categorias a partir de um join independente entre transações e PaySettler. A decisão evita apresentar como falhas históricas diferenças entre os fixtures originais e o estado corrente, sem evidências suficientes para reconstruir os snapshots de cada execução.
+- **Escopo do full refresh:** todas as fontes são relidas a cada execução; a idempotência demonstrada exige um conjunto completo e estável de entradas. Ingestão incremental, offset/LSN, backfills e atualizações por partição são propostas de evolução, não funcionalidades já implementadas.
+- **Escopo da reconciliação:** os resultados de conciliação são provenientes do serviço fonte. O pipeline não reexecuta independentemente o algoritmo financeiro sobre os históricos de cada arquivo/run. As discrepâncias dos fixtures originais são diagnósticos e não permitem, isoladamente, concluir que o resultado histórico reportado está errado.
 
 Mais detalhes: [Decisões arquiteturais](docs/ARCHITECTURE_DECISIONS.md) e [contratos Gold](docs/GOLD_CONTRACT_REVIEW.md).
 
@@ -104,11 +368,11 @@ flowchart TD
   E -. diagnósticos não bloqueantes .-> F
   F --> G[CFO e Operações]
   H --> I[Compliance]
-  B -. telemetria .-> O[Observabilidade: ops.pipeline_runs / steps / metrics]
-  D -. telemetria .-> O
-  E -. telemetria .-> O
-  F -. telemetria .-> O
-  H -. telemetria .-> O
+  B -. métricas .-> O[Observabilidade persistente: ops]
+  D -. métricas .-> O
+  E -. métricas .-> O
+  F -. métricas .-> O
+  H -. métricas .-> O
 ```
 
 **Organização principal:**
@@ -118,14 +382,14 @@ scripts/bronze_ingest.py      # ingestão e normalização
 scripts/silver_cdc.py         # CDC e quarentena de empate
 scripts/data_quality.py      # regras de consistência e issues
 scripts/gold.py              # três produtos Gold
-scripts/run_pipeline.py      # CLI, idempotência e instrumentação das etapas
-scripts/pipeline_observability.py  # histórico persistente de execuções e métricas
+scripts/run_pipeline.py      # CLI, idempotência e observabilidade
+scripts/pipeline_observability.py # histórico persistente de execuções e métricas
 tests/                       # 22 testes aprovados no ambiente validado
 docs/sample-data/            # entradas originais, preservadas
 docs/ARCHITECTURE_DECISIONS.md
 docs/GOLD_CONTRACT_REVIEW.md
-docs/OBSERVABILITY.md        # telemetria e limitações operacionais
-docs/SCALABILITY_PLAN.md     # evolução para produção
+docs/OBSERVABILITY.md
+docs/SCALABILITY_PLAN.md
 docs/GOLD_ANALYTICAL_QUERIES.md
 data/marvin.duckdb            # gerado localmente, não versionado
 ```
@@ -156,92 +420,72 @@ Este case simplifica deliberadamente o ambiente: arquivos locais no lugar de CDC
 
 Para produção eu adicionaria **extração CDC com offset/LSN e armazenamento versionado** (Parquet/Delta/Iceberg com idempotência por lote), **processamento incremental por partição/`reference_date` e política de backfill**, **contratos por processador com isolamento e `processor_name` obrigatório**, e **gates de DQ** (por exemplo, bloquear publicação financeira se a taxa de merchant mismatch exceder limiar acordado). Orquestração com retries, métricas de frescor/latência e rastreamento por `run_id`, além de RBAC e auditoria imutável para Compliance. Para a projeção de ~5M transações/dia, faria benchmark de memória/latência e avaliaria engine/armazenamento distribuído antes de ampliar o desenho local.
 
-**Troubleshooting (dashboards sem dados desde sexta-feira):** começar por `ops.pipeline_runs` e `ops.pipeline_steps` (última execução bem-sucedida, etapa falha, duração e erro), e então verificar disponibilidade e horários dos arquivos, status do container e logs da CLI, frescor das tabelas Bronze/Silver/Gold, última `reference_date` publicada, `dq.summary`, contagem por fonte/run e presença de locks/erros de commit. Comparar números da fonte com Bronze e Silver para localizar a perda. Acionar equipe dona da fonte se faltar arquivo/CDC; plataforma se houver falha de infraestrutura; time de reconciliação se houver categorias ou runs inesperados.
+**Troubleshooting (dashboards sem dados desde sexta-feira):** consultar `ops.pipeline_runs` e `ops.pipeline_steps` para localizar a última execução, etapa e mensagem de erro; verificar disponibilidade e horários dos arquivos, status do container e logs da CLI, frescor das tabelas Bronze/Silver/Gold, última `reference_date` publicada, `dq.summary`, contagem por fonte/run e presença de locks/erros de commit. Comparar números da fonte com Bronze e Silver para localizar a perda. Acionar equipe dona da fonte se faltar arquivo/CDC; plataforma se houver falha de infraestrutura; time de reconciliação se houver categorias ou runs inesperados.
 
 ## Ferramentas de IA utilizadas
 
 **ChatGPT (OpenAI):** apoio na discussão de arquitetura Bronze/Silver/Gold, desenho e geração inicial de scripts Python/SQL, testes, documentação, investigação de CDC ambíguo, resolução de dependências Docker/DuckDB e interpretação de relatórios de qualidade. O uso foi iterativo, com feedback de execuções reais e correções quando os primeiros scripts falharam (ex.: `TRIM(DOUBLE)`, conflitos CDC e dependência `pytz`).
 
-**Validação humana:** inspeção dos dados e do glossário, execução dos scripts e dos 22 testes originalmente reportados, confirmação de idempotência em Docker, execução do benchmark sintético de 1 milhão de registros e decisões finais sobre limitações e resultados. Código sugerido por IA deve ser revisado antes do PR; os resultados descritos acima vieram das execuções locais, não apenas de suposições do assistente.
+**Validação humana:** inspeção dos dados e do glossário, execução dos scripts e dos 22 testes, confirmação de idempotência em Docker e decisões finais sobre limitações e resultados. Código sugerido por IA deve ser revisado antes do PR; os resultados descritos acima vieram das execuções locais, não apenas de suposições do assistente.
 
 ### Escalabilidade
 
 A implementação atual utiliza processamento batch com full refresh,
 adequado ao escopo do desafio técnico.
 
-Para evoluir rumo a aproximadamente 5 milhões de transações por dia,
+Para suportar aproximadamente 5 milhões de transações por dia,
 foi elaborado um plano de evolução contemplando ingestão incremental,
 CDC, particionamento, processamento seletivo e escalabilidade horizontal.
 
 Consulte [Plano de Escalabilidade](docs/SCALABILITY_PLAN.md).
 
-## Benchmark de desempenho
+## Benchmark de desempenho — dados sintéticos
 
-Foi executado um teste local com dados **sintéticos gerados** pelo script `scripts/generate_sample_data.py` e parâmetro `--rows 1000000`. O benchmark utilizou um banco DuckDB separado dos fixtures originais. O valor de 1 milhão descreve o **parâmetro de geração / volume de referência**, não uma contagem auditada de todas as tabelas — a quantidade efetiva varia conforme a fonte e as regras CDC.
+Teste local executado com o gerador `scripts/generate_sample_data.py` usando `--rows 1000000`. O número de **1 milhão** é o parâmetro do gerador, não a contagem de linhas de todas as fontes (há registros CDC, PaySettler e resultados de reconciliação em quantidades distintas).
 
-**Resultado observado (pipeline completo, quatro etapas com status `SUCCESS`):**
+| Etapa | Tempo observado | Status |
+|---|---:|---|
+| Bronze | 41,70 s | SUCCESS |
+| Silver | 27,09 s | SUCCESS |
+| Data Quality | 2,05 s | SUCCESS |
+| Gold | 5,84 s | SUCCESS |
+| **Soma das etapas** | **76,68 s** | **SUCCESS** |
 
-| Etapa | Duração medida (`ops.pipeline_steps`) | Participação |
-|---|---:|---:|
-| Bronze | 41,70 s | 54,4% |
-| Silver | 27,09 s | 35,3% |
-| Data Quality | 2,05 s | 2,7% |
-| Gold | 5,84 s | 7,6% |
-| **Soma das etapas** | **76,68 s** | **100%** |
+A observabilidade registrou cerca de **54,4%** do tempo em Bronze e **35,3%** em Silver. Os **76,68 s** são a soma de durações das etapas, não um tempo externo medido do início ao fim do comando; não incluem necessariamente toda a inicialização e sobrecarga externa. Um throughput indicativo seria `1.000.000 / 76,68 ≈ 13.041 registros de referência/s`, mas **não equivale** ao total de linhas físicas efetivamente lidas/escritas.
 
-A taxa **indicativa** foi de aproximadamente **13 mil registros de referência por segundo** (`1.000.000 / 76,68`). Ela não equivale a throughput de linhas físicas totais: o pipeline processa várias fontes e as quatro etapas são sequenciais. Os **76,68 segundos são a soma das durações registradas por etapa**, e não uma medição externa de ponta a ponta, que também pode incluir inicialização e overhead do CLI. Bronze e Silver representaram aproximadamente **89,7%** da duração medida, sendo os primeiros candidatos a profiling e otimização.
-
-### Reproduzir o benchmark
-
-Gerar os dados localmente (fora do banco dos fixtures):
+### Reproduzir sem sobrescrever os fixtures
 
 ```bash
 mkdir -p data/benchmark_1m
 python scripts/generate_sample_data.py \
-  --rows 1000000 \
-  --days 30 \
-  --merchants 500 \
-  --seed 42 \
-  --clean \
+  --rows 1000000 --days 30 --merchants 500 --seed 42 --clean \
   --out data/benchmark_1m
-```
 
-A ingestão Bronze contempla a busca de `settlement_*.csv` no subdiretório `paysettler/`, quando disponível, com fallback para os arquivos da raiz. **Não copie os arquivos diários para a raiz sem verificar os padrões de descoberta**, para não duplicar os dados PaySettler.
-
-```bash
 /usr/bin/time -v docker compose exec -T pipeline \
   python scripts/run_pipeline.py \
   --input-dir /app/data/benchmark_1m \
   --db /app/data/benchmark_1m.duckdb \
-  --with-gold \
-  --gold-script scripts/gold.py
+  --with-gold --gold-script scripts/gold.py
 ```
 
-> O mount `./data:/app/data` precisa estar ativo. O comando `/usr/bin/time -v` executado no host mede o processo Docker CLI; seu campo de memória (`Maximum resident set size`) **não representa, necessariamente, a memória do processo Python no container**. Para medi-la, usar `docker stats` durante a execução e registrar o hardware, limites de memória, versão DuckDB e tamanho do banco.
-
-Consultar a duração de cada etapa no banco **`data/benchmark_1m.duckdb`**:
+O bind mount `./data:/app/data` deve estar ativo. O script Bronze encontra `settlement_*.csv` no subdiretório `paysettler/` (com fallback para a raiz), evitando a mistura inadvertida com o arquivo consolidado. **Não copie arquivos CSV diários para a raiz sem revisar a descoberta de arquivos.**
 
 ```sql
+-- No banco data/benchmark_1m.duckdb: consultar telemetria e volumes efetivos
 SELECT step_name, duration_seconds, status
-FROM ops.pipeline_steps
-ORDER BY started_at;
+FROM ops.pipeline_steps ORDER BY started_at;
+
+SELECT 'transactions' AS dataset, COUNT(*) AS rows FROM bronze.transactions
+UNION ALL SELECT 'reconciliation_results', COUNT(*) FROM bronze.reconciliation_results
+UNION ALL SELECT 'paysettler', COUNT(*) FROM bronze.paysettler
+UNION ALL SELECT 'audit_trail', COUNT(*) FROM gold.reconciliation_audit_trail;
 ```
 
-Conferir os volumes efetivos de cada fonte e produto antes de tirar conclusões de throughput:
+Também houve uma execução sintética com parâmetro `--rows 10000`: 9.479 transações internas, 10.000 resultados, 9.524 linhas PaySettler e 10.000 linhas de auditoria Gold. O `/usr/bin/time -v` registrou **3,41 s externos** para esse caso, métrica **não diretamente comparável** à soma interna de etapas do teste de 1 milhão.
 
-```sql
-SELECT 'bronze.transactions' AS table_name, COUNT(*) AS row_count FROM bronze.transactions
-UNION ALL SELECT 'bronze.reconciliation_results', COUNT(*) FROM bronze.reconciliation_results
-UNION ALL SELECT 'bronze.paysettler', COUNT(*) FROM bronze.paysettler
-UNION ALL SELECT 'silver.transactions_current', COUNT(*) FROM silver.transactions_current
-UNION ALL SELECT 'gold.reconciliation_audit_trail', COUNT(*) FROM gold.reconciliation_audit_trail;
-```
+**Limites deste benchmark:** não foi comprovado consumo máximo de RAM do processo Python dentro do container nem operação sustentada a 5 milhões por dia. `Maximum resident set size` do comando `/usr/bin/time` executado no host mede o processo Docker CLI, não necessariamente a memória do container. Antes de extrapolar escalabilidade, medir `docker stats`, recursos do ambiente, tamanho do banco, execução contínua e recuperação de falhas.
 
-### Baseline menor e interpretação
-
-Em outro teste com dados sintéticos (`--rows 10000 --days 30 --merchants 100 --seed 42 --clean`), observaram-se **9.479 transações internas**, **10.000 resultados de reconciliação**, **9.524 eventos PaySettler** e **10.000 linhas em `gold.reconciliation_audit_trail`**. O tempo externo medido com `/usr/bin/time -v` foi **3,41 s**. Como esse valor é um **wall-clock externo**, não deve ser comparado diretamente à soma das durações das etapas no teste de 1 milhão para afirmar ganho de throughput ou fator de escala.
-
-O benchmark de 1 milhão **não demonstra sozinho** capacidade sustentada para milhões de transações por dia, crescimento histórico de anos, tolerância a falhas ou uso de memória dentro de um limite específico. Essas afirmações exigiriam contagens verificadas, medição do processo no container, execução contínua, cenários com dados sujos e testes de recuperação. O desenho atual continua **full refresh**, e a evolução para incremental deve ser considerada conforme o SLA, a retenção e o volume histórico real.
+---
 
 ### Exemplos de consultas analíticas
 
